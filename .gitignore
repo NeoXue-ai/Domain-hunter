@@ -19,3 +19,5 @@ screenshots/
 htmlcov/
 frontend/node_modules/
 frontend/*.tsbuildinfo
+.pytest-tmp/
+*.log

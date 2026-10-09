@@ -141,7 +141,7 @@ def test_cache_used_for_repeat_runs() -> None:
     assert len(candidates) == 1
 
 
-def test_report_counts() -> None:
+def test_tier_classification_by_registration_age() -> None:
     regs = {
         "a.com": _reg(5, "a.com"),
         "b.com": _reg(60, "b.com"),
@@ -152,12 +152,16 @@ def test_report_counts() -> None:
         rdap_fetcher=_fake_rdap(regs),
         dns_checker=_fake_dns({"a.com", "b.com"}),
     )
-    report = pipeline.report(["a.com", "b.com", "c.com"])
-    assert report["input"] == 3
-    assert report["kept"] == 2
-    assert report["dropped"] == 1
-    assert report["tier1"] == 1
-    assert report["tier2"] == 1
+    by_domain = {d.domain: d for d in pipeline.evaluate(["a.com", "b.com", "c.com"])}
+
+    assert by_domain["a.com"].candidate is not None
+    assert by_domain["a.com"].candidate.final_tier == "tier1"
+    assert by_domain["b.com"].candidate is not None
+    assert by_domain["b.com"].candidate.final_tier == "tier2"
+    # An over-age registration is terminal, not something to retry.
+    assert by_domain["c.com"].candidate is None
+    assert by_domain["c.com"].retryable is False
+    assert by_domain["c.com"].reason == "rdap_too_old"
 
 
 def test_candidate_payload_shape() -> None:

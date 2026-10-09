@@ -245,8 +245,17 @@ async def _run_follow(
                 cycle=cycle,
             )
         )
-        ingested, queued = await ingest_task
-        rounds, cycle_probes, cycle_candidates = await digest_task
+        try:
+            ingested, queued = await ingest_task
+            rounds, cycle_probes, cycle_candidates = await digest_task
+        except BaseException:
+            # A failed sweep must not leave the digest loop spinning against a
+            # work queue that will never be refilled: cancel both and collect
+            # them so the original exception is what propagates.
+            for pending in (ingest_task, digest_task):
+                pending.cancel()
+            await asyncio.gather(ingest_task, digest_task, return_exceptions=True)
+            raise
         total_ingested += ingested
         total_rounds += rounds
         total_probes += cycle_probes

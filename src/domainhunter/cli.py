@@ -43,28 +43,6 @@ def _init(args: argparse.Namespace) -> int:
     return 0
 
 
-async def _run_orchestrator(args: argparse.Namespace, fetcher: object) -> object:
-    store = SQLiteStore(args.database)
-    poller = CTPoller(store=store, fetch_page=fetcher)  # type: ignore[arg-type]
-    async with HTTPProbe() as probe:
-        pipeline = DomainHunterPipeline(store=store, probe=probe)
-        strict_filter = FilterPipeline(
-            tier1_days=30,
-            tier2_days=90,
-            require_dns=True,
-            drop_unknown_rdap=True,
-        )
-        orchestrator = CTIngestOrchestrator(
-            store=store,
-            poller=poller,
-            pipeline=pipeline,
-            probe_limit=args.max_probes,
-            filter_pipeline=strict_filter,
-            require_first_seen=True,
-        )
-        return await orchestrator.run_once()
-
-
 def _status(args: argparse.Namespace) -> int:
     store = SQLiteStore(args.database)
     observed_at = args.at or datetime.now(UTC)
@@ -95,9 +73,6 @@ def _parse_log_spec(value: str) -> CTLogTarget:
 def _start(args: argparse.Namespace) -> int:
     """Continuous discovery: sweep new CT entries at max speed until Ctrl-C."""
 
-    import logging
-
-    from domainhunter.filter.pipeline import FilterPipeline
     from domainhunter.ingest.runner import StartConfig, run_start
 
     logging.basicConfig(

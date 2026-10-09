@@ -91,6 +91,75 @@ def test_start_config_rejects_bad_knobs() -> None:
         StartConfig(hours=1, claim_limit=-1)
 
 
+def test_run_follow_cancels_the_digest_loop_when_the_sweep_fails() -> None:
+    """A failed sweep must not leave the digest loop running in the background.
+
+    ``_run_follow`` awaits the ingest task first; if that raises, the digest
+    task used to be neither awaited nor cancelled, so it kept spinning against
+    a work queue that could never be refilled.
+    """
+    import asyncio
+
+    from domainhunter.ingest.runner import _run_follow
+
+    class _Store:
+        def get_source_cursor(self, _name: str) -> None:
+            return None
+
+        def pending_ct_discovery_work_count(self) -> int:
+            return 1  # never drains, so the digest loop would spin forever
+
+    class _Log:
+        log_id = "log"
+
+    class _Fetcher:
+        logs = (_Log(),)
+
+        async def tree_sizes(self) -> dict[str, int]:
+            return {"log": 20}
+
+        async def fetch_entries(self, *_args, **_kwargs):
+            await asyncio.sleep(0.05)  # let the digest loop start first
+            raise RuntimeError("sweep exploded")
+
+    class _Poller:
+        source_name = "ct_log"
+
+    digest = {"rounds": 0, "cancelled": False}
+
+    async def digest_once():
+        digest["rounds"] += 1
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            digest["cancelled"] = True
+            raise
+        raise AssertionError("digest_once should have been cancelled")
+
+    async def go() -> None:
+        with pytest.raises(RuntimeError, match="sweep exploded"):
+            await _run_follow(
+                store=_Store(),
+                fetcher=_Fetcher(),
+                poller=_Poller(),
+                digest_once=digest_once,
+                config=StartConfig(follow=True, idle_seconds=0.0, entries=5),
+                progress=lambda _event: None,
+            )
+        # Asserted here, not after asyncio.run(): teardown would cancel any
+        # leftover task itself and hide the leak this test exists to catch.
+        assert digest["rounds"] == 1, "the digest loop should have been entered"
+        assert digest["cancelled"] is True, "the digest loop was left running"
+        leftover = [
+            task
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task() and not task.done()
+        ]
+        assert leftover == [], f"tasks outlived _run_follow: {leftover}"
+
+    asyncio.run(go())
+
+
 def test_filter_pipeline_parallel_rdap_matches_sequential() -> None:
     seen: list[str] = []
     observed_peak = {"concurrent": 0, "current": 0}

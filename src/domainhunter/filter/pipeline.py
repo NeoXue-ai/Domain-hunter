@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol
 
 from domainhunter.filter.dns_check import DnsResult, check_dns
 from domainhunter.filter.rdap_age import (
@@ -68,6 +69,21 @@ class FilterDecision:
     reason: str
 
 
+class CandidateFilter(Protocol):
+    """The funnel contract the CT ingest orchestrator depends on.
+
+    Implementations must return exactly one :class:`FilterDecision` per input
+    domain, in input order. That completeness is what lets the orchestrator
+    settle every work item it claimed: a candidate becomes a probe, a
+    ``retryable`` rejection comes back after ``filter_retry_delay``, and a
+    terminal rejection is completed for good.
+    """
+
+    def evaluate(
+        self, domains: list[str], *, observed_at: datetime | None = None
+    ) -> tuple[FilterDecision, ...]: ...
+
+
 def _probe_payload(probe: object) -> dict[str, object]:
     """Best-effort serialization of a probe result for the review console."""
     if hasattr(probe, "as_payload"):
@@ -110,7 +126,11 @@ def _check_dns_parallel(
 
 
 class FilterPipeline:
-    """Run the S1→S2→S3 funnel over a batch of registrable domains."""
+    """Run the S1→S2→S3 funnel over a batch of registrable domains.
+
+    Satisfies :class:`CandidateFilter`; ``run`` is a convenience projection
+    of ``evaluate`` for callers that only want the survivors.
+    """
 
     def __init__(
         self,
@@ -319,15 +339,3 @@ class FilterPipeline:
                 )
             )
         return tuple(probed)
-
-    def report(self, domains: list[str]) -> dict[str, object]:
-        """Run the funnel and summarize layer-by-layer reduction."""
-        candidates = self.run(domains)
-        kept = len(candidates)
-        return {
-            "input": len(domains),
-            "kept": kept,
-            "dropped": len(domains) - kept,
-            "tier1": sum(1 for c in candidates if c.final_tier == "tier1"),
-            "tier2": sum(1 for c in candidates if c.final_tier == "tier2"),
-        }

@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from domainhunter.filter.pipeline import FilterDecision, FilterPipeline, FilteredCandidate
+from domainhunter.filter.pipeline import CandidateFilter, FilteredCandidate
 from domainhunter.ingest.ct_poller import CTPoller, CTPollResult
 from domainhunter.llm.provider import LLMProvider
 from domainhunter.pipeline import DomainHunterPipeline, enrich_candidate_with_llm
@@ -58,7 +58,7 @@ class CTIngestOrchestrator:
         store: SQLiteStore,
         poller: CTPoller,
         pipeline: DomainHunterPipeline,
-        filter_pipeline: FilterPipeline | None = None,
+        filter_pipeline: CandidateFilter | None = None,
         require_first_seen: bool = False,
         probe_limit: int = 50,
         provider: LLMProvider | None = None,
@@ -121,51 +121,36 @@ class CTIngestOrchestrator:
         filtered_by_domain: dict[str, FilteredCandidate] = {}
         strict_rejections = 0
         if self._filter_pipeline is not None:
-            decisions: tuple[FilterDecision, ...] | None = None
-            if isinstance(self._filter_pipeline, FilterPipeline):
-                decisions = self._filter_pipeline.evaluate(roots_to_probe, observed_at=stamp)
-                filtered = tuple(
-                    decision.candidate
-                    for decision in decisions
-                    if decision.candidate is not None
-                )
-                strict_rejections = sum(
-                    1
-                    for decision in decisions
-                    if decision.candidate is None and not decision.retryable
-                )
-            else:
-                filtered = self._filter_pipeline.run(roots_to_probe, observed_at=stamp)
-                strict_rejections = len(roots_to_probe) - len(filtered)
-            filtered_by_domain = {
-                candidate.domain: candidate
-                for candidate in filtered
-                if isinstance(candidate, FilteredCandidate)
-            }
-            roots_to_probe = [candidate.domain for candidate in filtered]
-            if decisions is not None:
-                for decision in decisions:
-                    if decision.candidate is None and not decision.retryable:
-                        self._store.complete_ct_discovery_domain(
-                            decision.domain,
-                            lease_token=work_by_domain[decision.domain].lease_token,
-                            at=stamp,
-                            reason=decision.reason,
-                        )
-                    elif decision.candidate is None:
-                        self._store.retry_ct_discovery_work(
-                            decision.domain,
-                            lease_token=work_by_domain[decision.domain].lease_token,
-                            scheduled_at=stamp + self._filter_retry_delay,
-                            error=decision.reason,
-                        )
-            elif set(roots_to_probe) != set(work_by_domain):
-                for root in set(work_by_domain) - set(roots_to_probe):
+            decisions = self._filter_pipeline.evaluate(roots_to_probe, observed_at=stamp)
+            kept = tuple(
+                decision.candidate
+                for decision in decisions
+                if decision.candidate is not None
+            )
+            strict_rejections = sum(
+                1
+                for decision in decisions
+                if decision.candidate is None and not decision.retryable
+            )
+            filtered_by_domain = {candidate.domain: candidate for candidate in kept}
+            roots_to_probe = [candidate.domain for candidate in kept]
+            for decision in decisions:
+                if decision.candidate is not None:
+                    continue
+                lease_token = work_by_domain[decision.domain].lease_token
+                if decision.retryable:
                     self._store.retry_ct_discovery_work(
-                        root,
-                        lease_token=work_by_domain[root].lease_token,
+                        decision.domain,
+                        lease_token=lease_token,
                         scheduled_at=stamp + self._filter_retry_delay,
-                        error="filter_rejected_without_retry_metadata",
+                        error=decision.reason,
+                    )
+                else:
+                    self._store.complete_ct_discovery_domain(
+                        decision.domain,
+                        lease_token=lease_token,
+                        at=stamp,
+                        reason=decision.reason,
                     )
         candidates_created = 0
         probes_run = 0

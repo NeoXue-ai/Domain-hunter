@@ -25,7 +25,7 @@ from domainhunter.domain.candidates import (
 from domainhunter.crawler.l1_analysis import L1Analysis
 from domainhunter.domain.observations import OutcomeCode
 from domainhunter.filter.dns_check import DnsResult
-from domainhunter.filter.pipeline import FilterPipeline
+from domainhunter.filter.pipeline import FilterDecision, FilterPipeline
 from domainhunter.filter.rdap_age import MemoryCache, Registration
 from domainhunter.domain.events import SourceEvent
 from domainhunter.ingest.ct_events import build_ct_events
@@ -68,30 +68,48 @@ class _ExplodingProbe:
         raise RuntimeError(f"probe interrupted for {hostname}")
 
 
-@dataclass(frozen=True, slots=True)
-class _FilteredRoot:
-    """Minimal filter result carrying the domain selected for probing."""
-
-    domain: str
-
-
 class _FakeFilterPipeline:
-    """Records the strict-mode inputs and returns only its configured roots."""
+    """Records the strict-mode inputs, then delegates to a real funnel.
+
+    Delegating (rather than hand-building ``FilterDecision`` objects) keeps the
+    real ``FilteredCandidate``/``AgeVerdict`` shape flowing into verification
+    persistence. Domains outside ``kept_domains`` get an over-age registration
+    so the funnel drops them terminally.
+    """
 
     def __init__(self, kept_domains: set[str]) -> None:
         self._kept_domains = kept_domains
         self.calls: list[tuple[tuple[str, ...], datetime]] = []
 
-    def run(
+    def _registration(self, domain: str, observed_at: datetime) -> Registration:
+        age = (
+            timedelta(days=2)
+            if domain in self._kept_domains
+            else timedelta(days=365 * 5)
+        )
+        return Registration(
+            domain=domain,
+            registration_date=observed_at - age,
+            registrar="Fake Registrar",
+            statuses=(),
+        )
+
+    def evaluate(
         self, domains: list[str], *, observed_at: datetime | None = None
-    ) -> tuple[_FilteredRoot, ...]:
+    ) -> tuple[FilterDecision, ...]:
         assert observed_at is not None
         self.calls.append((tuple(domains), observed_at))
-        return tuple(
-            _FilteredRoot(domain)
-            for domain in domains
-            if domain in self._kept_domains
+        funnel = FilterPipeline(
+            cache=MemoryCache(),
+            rdap_fetcher=lambda domain: self._registration(domain, observed_at),
+            dns_checker=lambda kept: {
+                domain: DnsResult(domain=domain, has_a=True, addresses=("1.2.3.4",))
+                for domain in kept
+            },
+            require_dns=True,
+            drop_unknown_rdap=True,
         )
+        return funnel.evaluate(domains, observed_at=observed_at)
 
 
 def _ai_publishable(domain: str) -> L1Analysis:
